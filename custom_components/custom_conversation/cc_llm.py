@@ -158,11 +158,17 @@ async def async_update_llm_data(
     if extra_system_prompt:
         LOGGER.debug("Using extra system prompt: %s", extra_system_prompt)
         prompt += "\n" + extra_system_prompt
-        get_langfuse_client().update_current_span(metadata={"tags": ["extra_system_prompt"]})
+        try:
+            get_langfuse_client().update_current_span(metadata={"tags": ["extra_system_prompt"]})
+        except Exception:
+            pass
 
     chat_log.llm_api = llm_api
     chat_log.extra_system_prompt = extra_system_prompt
-    chat_log.content[0] = SystemContent(content=prompt)
+    if not chat_log.content or not isinstance(chat_log.content[0], SystemContent):
+        chat_log.content.insert(0, SystemContent(content=prompt))
+    else:
+        chat_log.content[0] = SystemContent(content=prompt)
     trace.async_conversation_trace_append(
         trace.ConversationTraceEventType.AGENT_DETAIL,
         {

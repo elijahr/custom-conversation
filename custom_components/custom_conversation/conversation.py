@@ -199,7 +199,7 @@ def _convert_content_to_param(
         return cast(
             ChatCompletionMessageParam,
             {
-                "role": content.role,
+                "role": role,
                 "content": content.content,
             },
         )
@@ -260,11 +260,13 @@ async def _transform_litellm_stream(
 
         # Yield messages that don't involve tool calls
         if current_tool_call is None and not delta.tool_calls:
-            yield {
+            delta_dict = {
                 key: value
                 for key in ("role", "content")
-                if (value := getattr(delta, key)) is not None
+                if (value := getattr(delta, key, None)) is not None
             }
+            if delta_dict:
+                yield delta_dict
             continue
 
         # When doing tool calls, we should always have a tool call
@@ -417,7 +419,11 @@ class CustomConversationEntity(
         )
         new_tags = user_configured_tags + device_tags
 
-        get_langfuse_client().update_current_span(metadata={"tags": new_tags})
+        try:
+            get_langfuse_client().update_current_span(metadata={"tags": new_tags})
+        except Exception:
+            pass
+
         event_data = {
             "agent_id": user_input.agent_id,
             "conversation_id": user_input.conversation_id,
@@ -441,38 +447,30 @@ class CustomConversationEntity(
 
         if options.get(CONF_AGENTS_SECTION, {}).get(CONF_ENABLE_HASS_AGENT):
             LOGGER.debug("Processing with Home Assistant agent")
-            with (
-                chat_session.async_get_chat_session(
-                    self.hass, user_input.conversation_id
-                ) as session,
-                async_get_chat_log(self.hass, session, user_input) as chat_log,
-            ):
-                result = await self._async_handle_message_with_hass(user_input)
-                LOGGER.debug("Received response: %s", result.response.speech)
-                if result.response.error_code is None:
-                    await self._async_fire_conversation_ended(
-                        result,
-                        HOME_ASSISTANT_AGENT,
-                        user_input,
-                        device_data=device_data,
-                    )
-                    new_tags = ["handling_agent:home_assistant"]
-                    if result.response.intent.intent_type is not None:
-                        new_tags.append(f"intent:{result.response.intent.intent_type}")
-                    if len(result.response.success_results) > 0:
-                        for success_result in result.response.success_results:
-                            new_tags.append(f"affected_entity:{success_result.id}")
+            result = await self._async_handle_message_with_hass(user_input)
+            LOGGER.debug("Received response: %s", result.response.speech)
+            if result.response.error_code is None:
+                await self._async_fire_conversation_ended(
+                    result,
+                    HOME_ASSISTANT_AGENT,
+                    user_input,
+                    device_data=device_data,
+                )
+                new_tags = ["handling_agent:home_assistant"]
+                if result.response.intent.intent_type is not None:
+                    new_tags.append(f"intent:{result.response.intent.intent_type}")
+                if len(result.response.success_results) > 0:
+                    for success_result in result.response.success_results:
+                        new_tags.append(f"affected_entity:{success_result.id}")
+                try:
                     get_langfuse_client().update_current_span(output=result.as_dict())
                     get_langfuse_client().update_current_span(metadata={"tags": new_tags})
-                    return conversation.ConversationResult(
-                        response=result.response,
-                        conversation_id=session.conversation_id,
-                    )
-                # If we're about to call the LLM Agent next, we want to delete the last two messages
-                if options.get(CONF_AGENTS_SECTION, {}).get(CONF_ENABLE_LLM_AGENT):
-                    chat_log.content = await _remove_failed_hass_agent_messages(
-                        chat_log.content
-                    )
+                except Exception:
+                    pass
+                return conversation.ConversationResult(
+                    response=result.response,
+                    conversation_id=user_input.conversation_id,
+                )
 
         if options.get(CONF_AGENTS_SECTION, {}).get(CONF_ENABLE_LLM_AGENT):
             LOGGER.debug("Processing with LLM agent")
@@ -496,9 +494,12 @@ class CustomConversationEntity(
                             llm_data=llm_data,
                             device_data=device_data,
                         )
-                        get_langfuse_client().update_current_span(
-                            metadata={"tags": ["handling_agent:llm"]}
-                        )
+                        try:
+                            get_langfuse_client().update_current_span(
+                                metadata={"tags": ["handling_agent:llm"]}
+                            )
+                        except Exception:
+                            pass
                     else:
                         await self._async_fire_conversation_error(
                             result.response.error_code,
@@ -539,9 +540,12 @@ class CustomConversationEntity(
                 intent.IntentResponseErrorCode.UNKNOWN,
                 "Sorry, I had a problem talking to Home Assistant",
             )
-            get_langfuse_client().update_current_span(
-                output=intent_response.as_dict()
-            )
+            try:
+                get_langfuse_client().update_current_span(
+                    output=intent_response.as_dict()
+                )
+            except Exception:
+                pass
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=user_input.conversation_id
             )
@@ -566,7 +570,10 @@ class CustomConversationEntity(
             LOGGER.debug(
                 "Hass agent responded with error_code: %s", response.response.error_code
             )
-        get_langfuse_client().update_current_span(output=response.as_dict())
+        try:
+            get_langfuse_client().update_current_span(output=response.as_dict())
+        except Exception:
+            pass
         return response
 
     @observe(name="cc_handle_message_with_llm")
@@ -657,7 +664,10 @@ class CustomConversationEntity(
         intent_response.async_set_speech(final_assistant_message.content or "")
 
         llm_details, new_tags = _get_llm_details(messages)
-        get_langfuse_client().update_current_span(metadata={"tags": new_tags})
+        try:
+            get_langfuse_client().update_current_span(metadata={"tags": new_tags})
+        except Exception:
+            pass
 
         return conversation.ConversationResult(
             response=intent_response,
@@ -691,11 +701,16 @@ class CustomConversationEntity(
                 "options": {**entry.options},
             },
         }
-        get_langfuse_client().update_current_span(
-            input=cleaned_input,
-        )
-        generation_id = get_langfuse_client().get_current_observation_id()
-        existing_trace_id = get_langfuse_client().get_current_trace_id()
+        generation_id = None
+        existing_trace_id = None
+        try:
+            get_langfuse_client().update_current_span(
+                input=cleaned_input,
+            )
+            generation_id = get_langfuse_client().get_current_observation_id()
+            existing_trace_id = get_langfuse_client().get_current_trace_id()
+        except Exception:
+            pass
         primary_model = f"{entry.data.get(CONF_PRIMARY_PROVIDER)}/{entry.data.get(CONF_PRIMARY_CHAT_MODEL)}"
         secondary_model = (
             f"{entry.data.get(CONF_SECONDARY_PROVIDER)}/{entry.data.get(CONF_SECONDARY_CHAT_MODEL)}"
@@ -762,7 +777,10 @@ class CustomConversationEntity(
             raw_stream: AsyncGenerator[
                 StreamingChatCompletionChunk
             ] = await router.acompletion(**completion_kwargs)
-            get_langfuse_client().update_current_span(metadata={"prompt": prompt.__dict__ if prompt else None})
+            try:
+                get_langfuse_client().update_current_span(metadata={"prompt": prompt.__dict__ if prompt else None})
+            except Exception:
+                pass
 
             return _transform_litellm_stream(raw_stream)
 

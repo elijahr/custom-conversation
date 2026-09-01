@@ -213,6 +213,7 @@ class IntentTool(llm.Tool):
             intent_handler.description or f"Execute Home Assistant {self.name} intent"
         )
         self.extra_slots = None
+        self.parameters = vol.Schema({})
         if not (slot_schema := intent_handler.slot_schema):
             return
 
